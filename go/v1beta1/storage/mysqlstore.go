@@ -303,22 +303,19 @@ func (pg *MySQLStore) GetOccurrence(ctx context.Context, pID, oID string) (*pb.O
 func (pg *MySQLStore) ListOccurrences(ctx context.Context, pID, filter, pageToken string, pageSize int32) ([]*pb.Occurrence, string, error) {
 	var rows *sql.Rows
 	id := decryptInt64(pageToken, pg.paginationKey, 0)
-	var filter_query, query string
-	if filter != "" {
-		var fs MysqlFilterSql
-		filter_query = "AND " + fs.ParseFilter(filter, "")
-	} else {
-		filter_query = ""
+	filter_query, filter_args, err := parseMysqlFilter(filter, "")
+	if err != nil {
+		return nil, "", err
 	}
 	// apply the filter to the list:
-	query = fmt.Sprintf(mysqlListOccurrences, filter_query)
-	rows, err := pg.DB.Query(query, pID, id, pageSize)
+	query := fmt.Sprintf(mysqlListOccurrences, filter_query)
+	rows, err = pg.DB.Query(query, appendArgs([]interface{}{pID}, filter_args, id, pageSize)...)
 	if err != nil {
 		return nil, "", status.Error(codes.Internal, "Failed to list Occurrences from database")
 	}
 	// apply the filter to the count:
 	query = fmt.Sprintf(mysqlOccurrenceCount, filter_query)
-	count, err := pg.count(query, pID)
+	count, err := pg.count(query, appendArgs([]interface{}{pID}, filter_args)...)
 	if err != nil {
 		return nil, "", status.Error(codes.Internal, "Failed to count Occurrences from database")
 	}
@@ -475,22 +472,19 @@ func (pg *MySQLStore) GetOccurrenceNote(ctx context.Context, pID, oID string) (*
 func (pg *MySQLStore) ListNotes(ctx context.Context, pID, filter, pageToken string, pageSize int32) ([]*pb.Note, string, error) {
 	var rows *sql.Rows
 	id := decryptInt64(pageToken, pg.paginationKey, 0)
-	var filter_query, query string
-	if filter != "" {
-		var fs MysqlFilterSql
-		filter_query = "AND " + fs.ParseFilter(filter, "")
-	} else {
-		filter_query = ""
+	filter_query, filter_args, err := parseMysqlFilter(filter, "")
+	if err != nil {
+		return nil, "", err
 	}
 	// apply the filter to the list
-	query = fmt.Sprintf(mysqlListNotes, filter_query)
-	rows, err := pg.DB.Query(query, pID, id, pageSize)
+	query := fmt.Sprintf(mysqlListNotes, filter_query)
+	rows, err = pg.DB.Query(query, appendArgs([]interface{}{pID}, filter_args, id, pageSize)...)
 	if err != nil {
 		return nil, "", status.Error(codes.Internal, "Failed to list Notes from database")
 	}
 	// apply the filter to the count
 	query = fmt.Sprintf(mysqlNoteCount, filter_query)
-	count, err := pg.count(query, pID)
+	count, err := pg.count(query, appendArgs([]interface{}{pID}, filter_args)...)
 	if err != nil {
 		return nil, "", status.Error(codes.Internal, "Failed to count Notes from database")
 	}
@@ -528,18 +522,17 @@ func (pg *MySQLStore) ListNoteOccurrences(ctx context.Context, pID, nID, filter,
 	}
 	var rows *sql.Rows
 	id := decryptInt64(pageToken, pg.paginationKey, 0)
-	var filter_query, query string
-	if filter != "" {
-		var fs MysqlFilterSql
-		filter_query = "AND " + fs.ParseFilter(filter, "o.")
+	filter_query, filter_args, err := parseMysqlFilter(filter, "o.")
+	if err != nil {
+		return nil, "", err
 	}
-	query = fmt.Sprintf(mysqlListNoteOccurrences, filter_query)
-	rows, err := pg.DB.Query(query, pID, nID, id, pageSize)
+	query := fmt.Sprintf(mysqlListNoteOccurrences, filter_query)
+	rows, err = pg.DB.Query(query, appendArgs([]interface{}{pID, nID}, filter_args, id, pageSize)...)
 	if err != nil {
 		return nil, "", status.Error(codes.Internal, "Failed to list Occurrences from database")
 	}
 	query = fmt.Sprintf(mysqlNoteOccurrencesCount, filter_query)
-	count, err := pg.count(query, pID, nID)
+	count, err := pg.count(query, appendArgs([]interface{}{pID, nID}, filter_args)...)
 	if err != nil {
 		return nil, "", status.Error(codes.Internal, "Failed to count Occurrences from database")
 	}
@@ -581,6 +574,32 @@ func MySCreateSourceString(user, password, host, dbName, SSLMode string) string 
 		return fmt.Sprintf("tcp(%s)/%s", host, dbName)
 	}
 	return fmt.Sprintf("%s:%s@tcp(%s)/%s", user, password, host, dbName)
+}
+
+// parseMysqlFilter translates the user supplied filter into a SQL fragment with
+// placeholders plus the values to bind to them. The fragment holds no caller
+// controlled text, so it is safe to interpolate into a query template.
+func parseMysqlFilter(filter, dataPrefix string) (string, []interface{}, error) {
+	if filter == "" {
+		return "", nil, nil
+	}
+	var fs MysqlFilterSql
+	filterSQL, args, err := fs.ParseFilter(filter, dataPrefix)
+	if err != nil {
+		log.Printf("Invalid filter: %v", err)
+		return "", nil, status.Error(codes.InvalidArgument, "Invalid filter")
+	}
+	return "AND " + filterSQL, args, nil
+}
+
+// appendArgs builds the query argument list, keeping the filter values in the
+// position their placeholders occupy in the query template.
+func appendArgs(leading []interface{}, filterArgs []interface{}, trailing ...interface{}) []interface{} {
+	args := make([]interface{}, 0, len(leading)+len(filterArgs)+len(trailing))
+	args = append(args, leading...)
+	args = append(args, filterArgs...)
+	args = append(args, trailing...)
+	return args
 }
 
 // count returns the total number of entries for the specified query (assuming SELECT(*) is used)
