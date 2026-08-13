@@ -18,17 +18,35 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/grafeas/grafeas/go/iam"
 	prpb "github.com/grafeas/grafeas/proto/v1beta1/project_go_proto"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
+// denyAuth denies every access check and records the permissions it was asked about.
+type denyAuth struct {
+	perms []iam.Permission
+}
+
+func (a *denyAuth) CheckAccessAndProject(ctx context.Context, projectID string, entityID string, p iam.Permission) error {
+	a.perms = append(a.perms, p)
+	return status.Error(codes.PermissionDenied, "permission denied")
+}
+
+func (a *denyAuth) PurgePolicy(ctx context.Context, projectID string, entityID string, r iam.Resource) error {
+	return nil
+}
+
 // fakeStorage implements the projects storage interface using an in-memory map for tests. Filters
 // and page tokens on list methods aren't supported.
 type fakeStorage struct {
 	// Map of project IDs to projects.
 	projects map[string]*prpb.Project
+
+	// Page size the last call to ListProjects was made with.
+	listPageSize int
 
 	// The following errors are for simulating an internal database error.
 	createProjErr, getProjErr, listProjErr, deleteProjErr bool
@@ -69,6 +87,8 @@ func (s *fakeStorage) ListProjects(ctx context.Context, filter string, pageSize 
 		return nil, "", status.Error(codes.Internal, "failed to list projects")
 	}
 
+	s.listPageSize = pageSize
+
 	// Ignore filter, pageSize, and pageToken params in these tests.
 	projects := []*prpb.Project{}
 	for _, p := range s.projects {
@@ -90,6 +110,7 @@ func TestCreateProject(t *testing.T) {
 	ctx := context.Background()
 	gp := &API{
 		Storage: newFakeStorage(),
+		Auth:    &NoOpAuth{},
 	}
 	proj := &prpb.Project{
 		Name: "projects/1234",
@@ -155,6 +176,7 @@ func TestCreateProjectErrors(t *testing.T) {
 		s.createProjErr = tt.internalStorageErr
 		gp := &API{
 			Storage: s,
+			Auth:    &NoOpAuth{},
 		}
 
 		_, err := gp.CreateProject(ctx, tt.req)
@@ -170,6 +192,7 @@ func TestGetProject(t *testing.T) {
 	s := newFakeStorage()
 	gp := &API{
 		Storage: s,
+		Auth:    &NoOpAuth{},
 	}
 
 	// Create the project to get.
@@ -225,6 +248,7 @@ func TestGetProjectErrors(t *testing.T) {
 		s.getProjErr = tt.internalStorageErr
 		gp := &API{
 			Storage: s,
+			Auth:    &NoOpAuth{},
 		}
 
 		_, err := gp.GetProject(ctx, tt.req)
@@ -240,6 +264,7 @@ func TestListProjects(t *testing.T) {
 	s := newFakeStorage()
 	gp := &API{
 		Storage: s,
+		Auth:    &NoOpAuth{},
 	}
 
 	// Create the project to list.
@@ -284,6 +309,7 @@ func TestListProjectsErrors(t *testing.T) {
 		s.listProjErr = tt.internalStorageErr
 		gp := &API{
 			Storage: s,
+			Auth:    &NoOpAuth{},
 		}
 
 		_, err := gp.ListProjects(ctx, tt.req)
@@ -299,6 +325,7 @@ func TestDeleteProject(t *testing.T) {
 	s := newFakeStorage()
 	gp := &API{
 		Storage: s,
+		Auth:    &NoOpAuth{},
 	}
 
 	// Create the project to delete.
@@ -349,12 +376,127 @@ func TestDeleteProjectErrors(t *testing.T) {
 		s.deleteProjErr = tt.internalStorageErr
 		gp := &API{
 			Storage: s,
+			Auth:    &NoOpAuth{},
 		}
 
 		_, err := gp.DeleteProject(ctx, tt.req)
 		t.Logf("%q: error:%v", tt.desc, err)
 		if status.Code(err) != tt.wantErrStatus {
 			t.Errorf("%q: got error status %v, want %v", tt.desc, status.Code(err), tt.wantErrStatus)
+		}
+	}
+}
+
+func TestUnauthorizedRequestsAreDenied(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		desc     string
+		call     func(gp *API) error
+		wantPerm iam.Permission
+	}{
+		{
+			desc: "create project",
+			call: func(gp *API) error {
+				_, err := gp.CreateProject(ctx, &prpb.CreateProjectRequest{Project: &prpb.Project{Name: "projects/1234"}})
+				return err
+			},
+			wantPerm: ProjectsCreate,
+		},
+		{
+			desc: "get project",
+			call: func(gp *API) error {
+				_, err := gp.GetProject(ctx, &prpb.GetProjectRequest{Name: "projects/1234"})
+				return err
+			},
+			wantPerm: ProjectsGet,
+		},
+		{
+			desc: "list projects",
+			call: func(gp *API) error {
+				_, err := gp.ListProjects(ctx, &prpb.ListProjectsRequest{})
+				return err
+			},
+			wantPerm: ProjectsList,
+		},
+		{
+			desc: "delete project",
+			call: func(gp *API) error {
+				_, err := gp.DeleteProject(ctx, &prpb.DeleteProjectRequest{Name: "projects/1234"})
+				return err
+			},
+			wantPerm: ProjectsDelete,
+		},
+	}
+
+	for _, tt := range tests {
+		s := newFakeStorage()
+		proj := &prpb.Project{Name: "projects/1234"}
+		if _, err := s.CreateProject(ctx, "1234", proj); err != nil {
+			t.Fatalf("%q: failed to create project %+v", tt.desc, proj)
+		}
+		auth := &denyAuth{}
+		gp := &API{
+			Storage: s,
+			Auth:    auth,
+		}
+
+		err := tt.call(gp)
+		if status.Code(err) != codes.PermissionDenied {
+			t.Errorf("%q: got error status %v, want %v", tt.desc, status.Code(err), codes.PermissionDenied)
+		}
+		if len(auth.perms) != 1 || auth.perms[0] != tt.wantPerm {
+			t.Errorf("%q: got checked permissions %v, want [%v]", tt.desc, auth.perms, tt.wantPerm)
+		}
+		if _, ok := s.projects["1234"]; !ok {
+			t.Errorf("%q: project was mutated by an unauthorized call", tt.desc)
+		}
+	}
+}
+
+func TestRequestsAreDeniedWhenNoAuthIsConfigured(t *testing.T) {
+	ctx := context.Background()
+	gp := &API{
+		Storage: newFakeStorage(),
+	}
+
+	if _, err := gp.ListProjects(ctx, &prpb.ListProjectsRequest{}); status.Code(err) != codes.PermissionDenied {
+		t.Errorf("ListProjects: got error status %v, want %v", status.Code(err), codes.PermissionDenied)
+	}
+	if _, err := gp.DeleteProject(ctx, &prpb.DeleteProjectRequest{Name: "projects/1234"}); status.Code(err) != codes.PermissionDenied {
+		t.Errorf("DeleteProject: got error status %v, want %v", status.Code(err), codes.PermissionDenied)
+	}
+}
+
+func TestListProjectsPageSize(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		desc          string
+		pageSize      int32
+		wantPageSize  int
+		wantErrStatus codes.Code
+	}{
+		{desc: "unset page size uses the default", pageSize: 0, wantPageSize: defaultPageSize},
+		{desc: "valid page size is passed through", pageSize: 10, wantPageSize: 10},
+		{desc: "page size above the max is rejected", pageSize: maxPageSize + 1, wantErrStatus: codes.InvalidArgument},
+		{desc: "negative page size is rejected", pageSize: -1, wantErrStatus: codes.InvalidArgument},
+	}
+
+	for _, tt := range tests {
+		s := newFakeStorage()
+		gp := &API{
+			Storage: s,
+			Auth:    &NoOpAuth{},
+		}
+
+		_, err := gp.ListProjects(ctx, &prpb.ListProjectsRequest{PageSize: tt.pageSize})
+		if status.Code(err) != tt.wantErrStatus {
+			t.Errorf("%q: got error status %v, want %v", tt.desc, status.Code(err), tt.wantErrStatus)
+			continue
+		}
+		if tt.wantErrStatus == codes.OK && s.listPageSize != tt.wantPageSize {
+			t.Errorf("%q: got page size %d, want %d", tt.desc, s.listPageSize, tt.wantPageSize)
 		}
 	}
 }

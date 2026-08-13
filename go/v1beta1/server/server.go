@@ -186,7 +186,10 @@ func newGrpcServer(tlsConfig *tls.Config, db *grafeas.Storage, proj *project.Sto
 	}
 	pb.RegisterGrafeasV1Beta1Server(grpcServer, &g)
 
-	gp := project.API{Storage: *proj}
+	gp := project.API{
+		Storage: *proj,
+		Auth:    &grafeas.NoOpAuth{},
+	}
 	prpb.RegisterProjectsServer(grpcServer, &gp)
 
 	return grpcServer
