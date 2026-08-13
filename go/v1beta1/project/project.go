@@ -18,6 +18,7 @@ import (
 	"log"
 
 	"github.com/golang/protobuf/ptypes/empty"
+	"github.com/grafeas/grafeas/go/iam"
 	"github.com/grafeas/grafeas/go/name"
 	prpb "github.com/grafeas/grafeas/proto/v1beta1/project_go_proto"
 	"golang.org/x/net/context"
@@ -37,8 +38,39 @@ type Storage interface {
 	DeleteProject(ctx context.Context, pID string) error
 }
 
+const (
+	defaultPageSize = 100
+	maxPageSize     = 1000
+)
+
 type API struct {
 	Storage Storage
+	Auth    Auth
+}
+
+// checkAccess authorizes the current call. It fails closed if no Auth implementation is configured
+// so that a misconfigured server never serves the projects API unauthorized.
+func (gp *API) checkAccess(ctx context.Context, pID string, p iam.Permission) error {
+	if gp.Auth == nil {
+		log.Print("No auth configured for the projects API, denying request")
+		return status.Errorf(codes.PermissionDenied, "permission denied")
+	}
+	return gp.Auth.CheckAccessAndProject(ctx, pID, "", p)
+}
+
+// validatePageSize returns the default page size if the specified page size is 0, otherwise it
+// validates the specified page size.
+func validatePageSize(ps int32) (int32, error) {
+	switch {
+	case ps == 0:
+		return defaultPageSize, nil
+	case ps > maxPageSize:
+		return 0, status.Errorf(codes.InvalidArgument, "page size %d cannot be larger than max page size %d", ps, maxPageSize)
+	case ps < 0:
+		return 0, status.Errorf(codes.InvalidArgument, "page size %d cannot be negative", ps)
+	}
+
+	return ps, nil
 }
 
 // CreateProject creates the specified project in the storage.
@@ -58,6 +90,10 @@ func (gp *API) CreateProject(ctx context.Context, req *prpb.CreateProjectRequest
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid project name")
 	}
 
+	if err := gp.checkAccess(ctx, pID, ProjectsCreate); err != nil {
+		return nil, err
+	}
+
 	p, err := gp.Storage.CreateProject(ctx, pID, proj)
 	if err != nil {
 		return nil, err
@@ -72,6 +108,9 @@ func (gp *API) GetProject(ctx context.Context, req *prpb.GetProjectRequest) (*pr
 		log.Printf("Error parsing project name: %v", req.Name)
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid Project name")
 	}
+	if err := gp.checkAccess(ctx, pID, ProjectsGet); err != nil {
+		return nil, err
+	}
 	p, err := gp.Storage.GetProject(ctx, pID)
 	if err != nil {
 		return nil, err
@@ -82,10 +121,16 @@ func (gp *API) GetProject(ctx context.Context, req *prpb.GetProjectRequest) (*pr
 // ListProjects returns the project id for all projects in the backing datastore.
 func (gp *API) ListProjects(ctx context.Context, req *prpb.ListProjectsRequest) (*prpb.ListProjectsResponse, error) {
 	// TODO: support filters
-	if req.PageSize == 0 {
-		req.PageSize = 100
+	if err := gp.checkAccess(ctx, "", ProjectsList); err != nil {
+		return nil, err
 	}
-	ps, nextToken, err := gp.Storage.ListProjects(ctx, req.Filter, int(req.PageSize), req.PageToken)
+
+	pageSize, err := validatePageSize(req.PageSize)
+	if err != nil {
+		return nil, err
+	}
+
+	ps, nextToken, err := gp.Storage.ListProjects(ctx, req.Filter, int(pageSize), req.PageToken)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +148,13 @@ func (gp *API) DeleteProject(ctx context.Context, req *prpb.DeleteProjectRequest
 		log.Printf("Error parsing project name: %v", req.Name)
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid Project name")
 	}
+	if err := gp.checkAccess(ctx, pID, ProjectsDelete); err != nil {
+		return nil, err
+	}
 	if err := gp.Storage.DeleteProject(ctx, pID); err != nil {
+		return nil, err
+	}
+	if err := gp.Auth.PurgePolicy(ctx, pID, "", Projects); err != nil {
 		return nil, err
 	}
 	return nil, nil
