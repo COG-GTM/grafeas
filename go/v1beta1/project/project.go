@@ -18,11 +18,23 @@ import (
 	"log"
 
 	"github.com/golang/protobuf/ptypes/empty"
+	"github.com/grafeas/grafeas/go/iam"
 	"github.com/grafeas/grafeas/go/name"
 	prpb "github.com/grafeas/grafeas/proto/v1beta1/project_go_proto"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+const (
+	// ProjectsGet is the permission to get a project.
+	ProjectsGet = iam.Permission("projects.get")
+	// ProjectsList is the permission to list projects. It is only ever granted on all projects.
+	ProjectsList = iam.Permission("projects.list")
+	// ProjectsCreate is the permission to create a project.
+	ProjectsCreate = iam.Permission("projects.create")
+	// ProjectsDelete is the permission to delete a project.
+	ProjectsDelete = iam.Permission("projects.delete")
 )
 
 // Storage provides storage functions for this API.
@@ -37,8 +49,30 @@ type Storage interface {
 	DeleteProject(ctx context.Context, pID string) error
 }
 
+// Auth provides authorization functions for this API. It is satisfied by the Grafeas API
+// authorizers, so that both APIs of a server enforce the same authorization decisions.
+type Auth interface {
+	// CheckAccessAndProject checks whether the caller is allowed to perform the specified action on
+	// the specified project. To prevent leaking information, the only kind of error this returns is
+	// a permission denied error.
+	CheckAccessAndProject(ctx context.Context, projectID string, entityID string, p iam.Permission) error
+}
+
 type API struct {
 	Storage Storage
+	// Auth authorizes every call. A nil Auth denies every call, so that a server that forgets to
+	// wire an authorizer does not expose its projects.
+	Auth Auth
+}
+
+// checkAccess authorizes the caller for the specified project, denying the request when no
+// authorizer is configured.
+func (gp *API) checkAccess(ctx context.Context, pID string, p iam.Permission) error {
+	if gp.Auth == nil {
+		log.Print("No authorizer is configured for the projects API, denying request")
+		return status.Error(codes.PermissionDenied, "permission denied")
+	}
+	return gp.Auth.CheckAccessAndProject(ctx, pID, "", p)
 }
 
 // CreateProject creates the specified project in the storage.
@@ -57,6 +91,9 @@ func (gp *API) CreateProject(ctx context.Context, req *prpb.CreateProjectRequest
 		log.Printf("Invalid project name: %v", proj.Name)
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid project name")
 	}
+	if err := gp.checkAccess(ctx, pID, ProjectsCreate); err != nil {
+		return nil, err
+	}
 
 	p, err := gp.Storage.CreateProject(ctx, pID, proj)
 	if err != nil {
@@ -72,6 +109,9 @@ func (gp *API) GetProject(ctx context.Context, req *prpb.GetProjectRequest) (*pr
 		log.Printf("Error parsing project name: %v", req.Name)
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid Project name")
 	}
+	if err := gp.checkAccess(ctx, pID, ProjectsGet); err != nil {
+		return nil, err
+	}
 	p, err := gp.Storage.GetProject(ctx, pID)
 	if err != nil {
 		return nil, err
@@ -81,6 +121,10 @@ func (gp *API) GetProject(ctx context.Context, req *prpb.GetProjectRequest) (*pr
 
 // ListProjects returns the project id for all projects in the backing datastore.
 func (gp *API) ListProjects(ctx context.Context, req *prpb.ListProjectsRequest) (*prpb.ListProjectsResponse, error) {
+	// Listing is not scoped to a single project, so it requires access to all of them.
+	if err := gp.checkAccess(ctx, "", ProjectsList); err != nil {
+		return nil, err
+	}
 	// TODO: support filters
 	if req.PageSize == 0 {
 		req.PageSize = 100
@@ -102,6 +146,9 @@ func (gp *API) DeleteProject(ctx context.Context, req *prpb.DeleteProjectRequest
 	if err != nil {
 		log.Printf("Error parsing project name: %v", req.Name)
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid Project name")
+	}
+	if err := gp.checkAccess(ctx, pID, ProjectsDelete); err != nil {
+		return nil, err
 	}
 	if err := gp.Storage.DeleteProject(ctx, pID); err != nil {
 		return nil, err

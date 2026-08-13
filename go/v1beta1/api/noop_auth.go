@@ -19,7 +19,13 @@ import (
 	"golang.org/x/net/context"
 )
 
-// NoOpAuth does nothing.
+// NoOpAuth does nothing: it authorizes every caller for every project and reports a constant
+// identity.
+//
+// It MUST NEVER be used in production. A server wired with NoOpAuth lets any client that can reach
+// it read, modify and delete the notes and occurrences of every project. It exists for tests and
+// for local development, and running a server with it requires an explicit opt-in, see
+// grafeas.api.auth.mode in the server configuration.
 type NoOpAuth struct{}
 
 func (a *NoOpAuth) CheckAccessAndProject(ctx context.Context, projectID string, entityID string, p iam.Permission) error {
