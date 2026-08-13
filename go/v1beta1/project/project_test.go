@@ -18,11 +18,26 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/grafeas/grafeas/go/iam"
 	prpb "github.com/grafeas/grafeas/proto/v1beta1/project_go_proto"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// fakeAuth authorizes every request, except the permissions listed in denied.
+type fakeAuth struct {
+	denied []iam.Permission
+}
+
+func (a *fakeAuth) CheckAccessAndProject(ctx context.Context, projectID string, entityID string, p iam.Permission) error {
+	for _, d := range a.denied {
+		if d == p {
+			return status.Error(codes.PermissionDenied, "permission denied")
+		}
+	}
+	return nil
+}
 
 // fakeStorage implements the projects storage interface using an in-memory map for tests. Filters
 // and page tokens on list methods aren't supported.
@@ -90,6 +105,7 @@ func TestCreateProject(t *testing.T) {
 	ctx := context.Background()
 	gp := &API{
 		Storage: newFakeStorage(),
+		Auth:    &fakeAuth{},
 	}
 	proj := &prpb.Project{
 		Name: "projects/1234",
@@ -155,6 +171,7 @@ func TestCreateProjectErrors(t *testing.T) {
 		s.createProjErr = tt.internalStorageErr
 		gp := &API{
 			Storage: s,
+			Auth:    &fakeAuth{},
 		}
 
 		_, err := gp.CreateProject(ctx, tt.req)
@@ -170,6 +187,7 @@ func TestGetProject(t *testing.T) {
 	s := newFakeStorage()
 	gp := &API{
 		Storage: s,
+		Auth:    &fakeAuth{},
 	}
 
 	// Create the project to get.
@@ -225,6 +243,7 @@ func TestGetProjectErrors(t *testing.T) {
 		s.getProjErr = tt.internalStorageErr
 		gp := &API{
 			Storage: s,
+			Auth:    &fakeAuth{},
 		}
 
 		_, err := gp.GetProject(ctx, tt.req)
@@ -240,6 +259,7 @@ func TestListProjects(t *testing.T) {
 	s := newFakeStorage()
 	gp := &API{
 		Storage: s,
+		Auth:    &fakeAuth{},
 	}
 
 	// Create the project to list.
@@ -284,6 +304,7 @@ func TestListProjectsErrors(t *testing.T) {
 		s.listProjErr = tt.internalStorageErr
 		gp := &API{
 			Storage: s,
+			Auth:    &fakeAuth{},
 		}
 
 		_, err := gp.ListProjects(ctx, tt.req)
@@ -299,6 +320,7 @@ func TestDeleteProject(t *testing.T) {
 	s := newFakeStorage()
 	gp := &API{
 		Storage: s,
+		Auth:    &fakeAuth{},
 	}
 
 	// Create the project to delete.
@@ -349,12 +371,63 @@ func TestDeleteProjectErrors(t *testing.T) {
 		s.deleteProjErr = tt.internalStorageErr
 		gp := &API{
 			Storage: s,
+			Auth:    &fakeAuth{},
 		}
 
 		_, err := gp.DeleteProject(ctx, tt.req)
 		t.Logf("%q: error:%v", tt.desc, err)
 		if status.Code(err) != tt.wantErrStatus {
 			t.Errorf("%q: got error status %v, want %v", tt.desc, status.Code(err), tt.wantErrStatus)
+		}
+	}
+}
+
+// TestAuthorization checks that every method is authorized, and that an API without an authorizer
+// denies every request.
+func TestAuthorization(t *testing.T) {
+	ctx := context.Background()
+
+	calls := map[iam.Permission]func(gp *API) error{
+		ProjectsCreate: func(gp *API) error {
+			_, err := gp.CreateProject(ctx, &prpb.CreateProjectRequest{Project: &prpb.Project{Name: "projects/1234"}})
+			return err
+		},
+		ProjectsGet: func(gp *API) error {
+			_, err := gp.GetProject(ctx, &prpb.GetProjectRequest{Name: "projects/1234"})
+			return err
+		},
+		ProjectsList: func(gp *API) error {
+			_, err := gp.ListProjects(ctx, &prpb.ListProjectsRequest{})
+			return err
+		},
+		ProjectsDelete: func(gp *API) error {
+			_, err := gp.DeleteProject(ctx, &prpb.DeleteProjectRequest{Name: "projects/1234"})
+			return err
+		},
+	}
+
+	for permission, call := range calls {
+		s := newFakeStorage()
+		if _, err := s.CreateProject(ctx, "1234", &prpb.Project{Name: "projects/1234"}); err != nil {
+			t.Fatalf("Failed to create project: %v", err)
+		}
+
+		// The caller is not granted the permission the method requires.
+		gp := &API{Storage: s, Auth: &fakeAuth{denied: []iam.Permission{permission}}}
+		if err := call(gp); status.Code(err) != codes.PermissionDenied {
+			t.Errorf("%s: got error status %v, want %v", permission, status.Code(err), codes.PermissionDenied)
+		}
+
+		// No authorizer is wired, the API must fail closed.
+		gp = &API{Storage: s}
+		if err := call(gp); status.Code(err) != codes.PermissionDenied {
+			t.Errorf("%s without authorizer: got error status %v, want %v", permission, status.Code(err), codes.PermissionDenied)
+		}
+
+		// The caller is granted the permission the method requires.
+		gp = &API{Storage: s, Auth: &fakeAuth{}}
+		if err := call(gp); err != nil {
+			t.Errorf("%s: got err %v, want success", permission, err)
 		}
 	}
 }

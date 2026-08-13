@@ -10,6 +10,26 @@ grafeas:
     # CORS configuration (optional)
     cors_allowed_origins:
       # - "http://example.net"
+    # Authorization configuration. Callers are identified by the common name of
+    # the client certificate they authenticate with, so the "policy" mode also
+    # requires cafile, keyfile and certfile to be set.
+    auth:
+      # One of:
+      #   "policy":            authorize callers against policy_file.
+      #   "deny_all":          deny every request. This is the default.
+      #   "insecure_disabled": no authorization at all, every caller can read,
+      #                        modify and delete every project. Never use this
+      #                        outside of tests and local development.
+      mode: "deny_all"
+      # Path to the YAML authorization policy, required by the "policy" mode:
+      #
+      #   bindings:
+      #     - identity: "build-system.example.com"
+      #       projects: ["my-project"]
+      #       permissions: ["projects.get", "notes.create"]
+      #
+      # "*" is a wildcard, and matches any identity, project or permission.
+      policy_file:
   # Supported storage types are "memstore" and "postgres"
   storage_type: "mysql"
   # Postgres options

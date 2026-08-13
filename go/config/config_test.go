@@ -30,6 +30,7 @@ func defaultServerConfig(t *testing.T) *ServerConfig {
 		KeyFile:            "",
 		CAFile:             "",
 		CORSAllowedOrigins: nil,
+		Auth:               &AuthConfig{Mode: AuthModeDenyAll},
 	}
 }
 
@@ -44,6 +45,7 @@ func userServerConfig(t *testing.T) *ServerConfig {
 			"http://example.com",
 			"https://somewhere.else.com",
 		},
+		Auth: &AuthConfig{Mode: AuthModeDenyAll},
 	}
 }
 
@@ -295,5 +297,98 @@ func TestLoadConfig_LoadsConfigWithoutError_ForExampleProjectConfiguration(t *te
 
 	if cfg.API == nil {
 		t.Errorf("config API is nil")
+	}
+}
+
+func TestLoadConfig_Auth(t *testing.T) {
+	tests := []struct {
+		desc     string
+		yaml     string
+		wantErr  bool
+		wantAuth *AuthConfig
+	}{
+		{
+			desc: "no auth configuration fails closed",
+			yaml: `
+grafeas:
+  api:
+    address: "0.0.0.0:8080"
+  storage_type: "memstore"
+`,
+			wantAuth: &AuthConfig{Mode: AuthModeDenyAll},
+		},
+		{
+			desc: "policy mode",
+			yaml: `
+grafeas:
+  api:
+    address: "0.0.0.0:8080"
+    auth:
+      mode: "policy"
+      policy_file: "/etc/grafeas/policy.yaml"
+  storage_type: "memstore"
+`,
+			wantAuth: &AuthConfig{Mode: AuthModePolicy, PolicyFile: "/etc/grafeas/policy.yaml"},
+		},
+		{
+			desc: "policy mode without a policy file",
+			yaml: `
+grafeas:
+  api:
+    address: "0.0.0.0:8080"
+    auth:
+      mode: "policy"
+  storage_type: "memstore"
+`,
+			wantErr: true,
+		},
+		{
+			desc: "explicitly disabled authorization",
+			yaml: `
+grafeas:
+  api:
+    address: "0.0.0.0:8080"
+    auth:
+      mode: "insecure_disabled"
+  storage_type: "memstore"
+`,
+			wantAuth: &AuthConfig{Mode: AuthModeInsecureDisabled},
+		},
+		{
+			desc: "unknown mode",
+			yaml: `
+grafeas:
+  api:
+    address: "0.0.0.0:8080"
+    auth:
+      mode: "allow_all"
+  storage_type: "memstore"
+`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		f, err := ioutil.TempFile("", "config")
+		if err != nil {
+			t.Fatalf("%q: failed to create config file: %v", tt.desc, err)
+		}
+		if _, err := f.Write([]byte(tt.yaml)); err != nil {
+			t.Fatalf("%q: failed to write config file: %v", tt.desc, err)
+		}
+		f.Close()
+
+		cfg, err := LoadConfig(f.Name())
+		os.Remove(f.Name())
+		if gotErr := err != nil; gotErr != tt.wantErr {
+			t.Errorf("%q: got error %v, want error presence %t", tt.desc, err, tt.wantErr)
+			continue
+		}
+		if tt.wantErr {
+			continue
+		}
+		if !cmp.Equal(cfg.API.Auth, tt.wantAuth) {
+			t.Errorf("%q: auth configuration is not correct\n%s", tt.desc, cmp.Diff(cfg.API.Auth, tt.wantAuth))
+		}
 	}
 }

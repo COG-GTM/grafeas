@@ -41,11 +41,48 @@ type GrafeasConfig struct {
 
 // ServerConfig is the Grafeas server configuration.
 type ServerConfig struct {
-	Address            string   `mapstructure:"address"`              // Endpoint address, e.g. localhost:8080 or unix:///var/run/grafeas.sock
-	CertFile           string   `mapstructure:"certfile"`             // A PEM encoded certificate file
-	KeyFile            string   `mapstructure:"keyfile"`              // A PEM encoded private key file
-	CAFile             string   `mapstructure:"cafile"`               // A PEM encoded CA's certificate file
-	CORSAllowedOrigins []string `mapstructure:"cors_allowed_origins"` // Permitted CORS origins.
+	Address            string      `mapstructure:"address"`              // Endpoint address, e.g. localhost:8080 or unix:///var/run/grafeas.sock
+	CertFile           string      `mapstructure:"certfile"`             // A PEM encoded certificate file
+	KeyFile            string      `mapstructure:"keyfile"`              // A PEM encoded private key file
+	CAFile             string      `mapstructure:"cafile"`               // A PEM encoded CA's certificate file
+	CORSAllowedOrigins []string    `mapstructure:"cors_allowed_origins"` // Permitted CORS origins.
+	Auth               *AuthConfig `mapstructure:"auth"`                 // Authorization configuration.
+}
+
+// Authorization modes supported by the reference server.
+const (
+	// AuthModePolicy authorizes callers against a policy file, binding the identity of the client
+	// certificate a caller authenticates with to the projects it may access.
+	AuthModePolicy = "policy"
+	// AuthModeDenyAll denies every request. It is the default, so that a server that has not been
+	// configured with an authorization backend does not serve data to anyone.
+	AuthModeDenyAll = "deny_all"
+	// AuthModeInsecureDisabled disables authorization entirely: every caller is authorized for
+	// every project. It must never be used outside of tests and local development.
+	AuthModeInsecureDisabled = "insecure_disabled"
+)
+
+// AuthConfig is the authorization configuration of the Grafeas server.
+type AuthConfig struct {
+	// Mode is one of the authorization modes above. It defaults to AuthModeDenyAll.
+	Mode string `mapstructure:"mode"`
+	// PolicyFile is the path to the YAML authorization policy, required by AuthModePolicy.
+	PolicyFile string `mapstructure:"policy_file"`
+}
+
+// Validate checks that the authorization configuration is complete and understood.
+func (a *AuthConfig) Validate() error {
+	switch a.Mode {
+	case AuthModePolicy:
+		if a.PolicyFile == "" {
+			return errors.New("grafeas.api.auth.policy_file is required when grafeas.api.auth.mode is \"policy\"")
+		}
+	case AuthModeDenyAll, AuthModeInsecureDisabled:
+	default:
+		return errors.New(fmt.Sprintf("unknown grafeas.api.auth.mode %q, must be one of %q, %q or %q",
+			a.Mode, AuthModePolicy, AuthModeDenyAll, AuthModeInsecureDisabled))
+	}
+	return nil
 }
 
 // EmbeddedStoreConfig is the configuration for embedded store.
@@ -91,6 +128,14 @@ grafeas:
     # CORS configuration (optional)
     cors_allowed_origins:
       # - "http://example.net"
+    # Authorization configuration. The default denies every request, a real
+    # deployment must either configure a policy or explicitly opt out of
+    # authorization.
+    auth:
+      # One of "policy", "deny_all" or "insecure_disabled".
+      mode: "deny_all"
+      # Path to the YAML authorization policy, required by the "policy" mode.
+      policy_file:
   # Supported storage types are "memstore" and "embedded"
   storage_type: "memstore"
 `)
@@ -120,6 +165,17 @@ func LoadConfig(fileName string) (*GrafeasConfig, error) {
 	serverCfg := ServerConfig{}
 	if err = v.UnmarshalKey("grafeas.api", &serverCfg); err != nil {
 		return nil, errors.New(fmt.Sprintf("Unable to decode into struct, %v", err))
+	}
+	if serverCfg.Auth == nil {
+		serverCfg.Auth = &AuthConfig{}
+	}
+	if serverCfg.Auth.Mode == "" {
+		// Fail closed: a server whose configuration does not mention authorization denies every
+		// request rather than serving every project to everyone.
+		serverCfg.Auth.Mode = AuthModeDenyAll
+	}
+	if err = serverCfg.Auth.Validate(); err != nil {
+		return nil, err
 	}
 	config.API = &serverCfg
 

@@ -35,9 +35,49 @@ To check out this repository:
 _Adding the `upstream` remote sets you up nicely for regularly [syncing your
 fork](https://help.github.com/articles/syncing-a-fork/)._
 
+## Authorization
+
+The Grafeas server fails closed: unless it is told how to authorize callers it
+denies every request. Authorization is configured under the `grafeas.api.auth`
+key of `config.yaml`, and `mode` is one of:
+
+* `deny_all` (the default): every request is denied.
+* `policy`: callers are authorized against `policy_file`.
+* `insecure_disabled`: authorization is disabled, every client that can reach
+  the server can read, modify and delete the notes and occurrences of every
+  project. **Never use this outside of tests and local development.**
+
+In `policy` mode a caller is identified by the common name of the client
+certificate it authenticates with, so `cafile`, `certfile` and `keyfile` must be
+configured as well (see [Use Grafeas with self-signed
+certificate](#use-grafeas-with-self-signed-certificate)); the server
+certificate must be issued by the configured CA, because the built-in REST
+gateway uses it to talk to the gRPC server. Requests without a verified client
+certificate carry no identity and are denied.
+
+The policy grants permissions on projects to identities. Anything that is not
+granted is denied:
+
+```yaml
+bindings:
+  - identity: "build-system.example.com"
+    projects: ["my-project"]
+    permissions: ["projects.get", "notes.create", "occurrences.create"]
+  - identity: "admin.example.com"
+    projects: ["*"]
+    permissions: ["*"]
+```
+
+`"*"` is a wildcard that matches any identity, project or permission. Listing
+projects is not scoped to a single project, so it requires a binding with a
+wildcard project.
+
 ## Start Grafeas
 
 The following options will start the Grafeas gRPC and REST APIs on `localhost:8080`.
+Note that the shipped configuration denies every request, set
+`grafeas.api.auth.mode` to `insecure_disabled` to try the server out locally, or
+to `policy` to enforce an authorization policy.
 
 ### Using published Docker image
 
