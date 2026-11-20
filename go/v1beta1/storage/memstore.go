@@ -122,8 +122,9 @@ func (m *MemStore) ListOccurrences(ctx context.Context, pID, filter, pageToken s
 	os := []*gpb.Occurrence{}
 	m.RLock()
 	defer m.RUnlock()
+	projectPrefix := fmt.Sprintf("projects/%v", pID)
 	for _, o := range m.occurrencesByID {
-		if strings.HasPrefix(o.Name, fmt.Sprintf("projects/%v", pID)) {
+		if strings.HasPrefix(o.Name, projectPrefix) {
 			os = append(os, o)
 		}
 	}
